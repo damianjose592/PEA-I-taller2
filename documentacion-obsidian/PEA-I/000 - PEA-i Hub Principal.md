@@ -8,7 +8,7 @@ estado: Activo
 
 > **UPC — Estructura de Datos (2026-I) | Docente: Ing. Adith Pérez | Meta: 5.0**
 > **Nueva dirección del cerebro:** `PEA-I/documentacion-obsidian/PEA-I/` (dentro del repo, se versiona con los avances).
-> **Entregable C++:** `PEA-I/Taller2_KM_PO_XX.cpp` (monolito único) · **Ingesta Python:** `PEA-I/Taller2_KM_PO_XX.py` · **BD:** `PEA-I/data/pea_investigacion.db` (3 grupos COL · 236 investigadores con hoja de vida CvLAC · 1532 productos limpios — ver S37)
+> **Entregable C++:** `PEA-I/Taller2_KM_PO_XX.cpp` (monolito único) · **Ingesta Python:** `PEA-I/Taller2_KM_PO_XX.py` · **BD:** `PEA-I/data/pea_investigacion.db` (4 grupos COL · 359 investigadores con hoja de vida CvLAC · 2352 productos — ver S38)
 
 ## Rama lógica
 - 📋 Requisitos: [[010 - Requisitos del Taller (Matriz 1-14)]] · [[011 - Problema de Negocio y Entidades]] · [[012 - Entregables, Fechas y Formato]] · [[013 - Visión Sistema Final]] · [[014 - Tabla Maestra 66 Grupos UPC]]

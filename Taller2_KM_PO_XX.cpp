@@ -21,6 +21,8 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <fstream>
+#include <filesystem>
 #include <sqlite3.h>
 
 #ifdef _WIN32
@@ -1141,12 +1143,43 @@ public:
                  << (inv->activo ? "" : " INACTIVO") << endl;
             inv = inv->sigInvestigador;
         }
-        cout << "--- Productos ---\n";
-        NodoProducto* p = g->primProducto;
-        while (p != nullptr) {
-            cout << " * (" << p->id_producto << ") " << p->titulo << " [" << p->tipo_producto << "/" << p->categoria << "/" << p->estado_validacion << "/" << p->anio_publicacion << "]"
-                 << (p->activo ? "" : " INACTIVO") << endl;
-            p = p->sigProductoGrupo;
+        // S38: sin volcado — conteo total + por tipo + top 10 recientes
+        // (la cadena ya viene de lo nuevo a lo viejo, S30). El listado
+        // completo vive en Productos del grupo.
+        {
+            int total = 0;
+            map<string, int> porTipo;
+            NodoProducto* q = g->primProducto;
+            while (q != nullptr) {
+                if (q->activo) { total++; porTipo[q->tipo_producto]++; }
+                q = q->sigProductoGrupo;
+            }
+            cout << "--- Productos (" << total << ") ---\n";
+            const char* orden[] = {"Articulo", "Libro", "Capitulo", "Software", "Patente",
+                                   "Evento", "Tesis", "Consultoria", "Informe", "CursoCorto",
+                                   "Jurado", "Contenido", "Compilacion", "Regulacion"};
+            string lin;
+            for (size_t i = 0; i < sizeof(orden) / sizeof(orden[0]); i++) {
+                map<string, int>::const_iterator it = porTipo.find(orden[i]);
+                if (it == porTipo.end()) continue;
+                if (!lin.empty()) lin += "  ";
+                lin += string(orden[i]) + ":" + to_string(it->second);
+            }
+            if (!lin.empty()) cout << " " << lin << "\n";
+            cout << "--- Top 10 recientes ---\n";
+            NodoProducto* p = g->primProducto;
+            int n = 0;
+            while (p != nullptr && n < 10) {
+                if (p->activo) {
+                    n++;
+                    cout << " " << n << ". (" << p->id_producto << ") "
+                         << truncarVisual(p->titulo, 84)
+                         << " [" << p->tipo_producto << "/" << p->anio_publicacion
+                         << "/" << p->estado_validacion << "]\n";
+                }
+                p = p->sigProductoGrupo;
+            }
+            cout << " Ver listado completo en: Productos del grupo.\n";
         }
     }
 
@@ -1274,6 +1307,86 @@ public:
             sqlite3_close(db);
             db = nullptr;
         }
+    }
+
+    // S38+: staging de sesión a prueba de cierre con X. Toda la sesión
+    // trabaja sobre data/pea_sesion.db (copia de la real); al salir, Sí la
+    // promueve a real y No la borra. Cerrar con X = la real queda intacta.
+    string dbReal;
+    string dbSesion;
+    std::filesystem::file_time_type t0sesion;
+
+    string rutaSesion() const { return "data/pea_sesion.db"; }
+
+    static bool copiarArchivo(const string& ori, const string& dst) {
+        ifstream f(ori, ios::binary);
+        if (!f) return false;
+        ofstream o(dst, ios::binary | ios::trunc);
+        if (!o) return false;
+        o << f.rdbuf();
+        return (bool)o;
+    }
+
+    bool iniciarSesion() {
+        dbReal = dbPath;
+        dbSesion = rutaSesion();
+        if (db == nullptr) return false;
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE);", nullptr, nullptr, nullptr);
+        desconectar();
+        if (!copiarArchivo(dbReal, dbSesion)) {
+            dbPath = dbReal;  // sin real previa: se trabaja directo (primer arranque)
+            conectar();
+            return false;
+        }
+        dbPath = dbSesion;
+        conectar();
+        std::error_code ec;
+        t0sesion = std::filesystem::last_write_time(dbSesion, ec);
+        return true;
+    }
+
+    // Sí: la sesión pasa a ser la BD real (con respaldo de la anterior).
+    bool confirmarSesion() {
+        if (dbSesion.empty()) return true;
+        desconectar();
+        copiarArchivo(dbReal, dbReal + ".bak-previa");
+        bool ok = copiarArchivo(dbSesion, dbReal);
+        std::error_code ec;
+        std::filesystem::remove(dbSesion, ec);
+        std::filesystem::remove(dbSesion + "-wal", ec);
+        std::filesystem::remove(dbSesion + "-shm", ec);
+        dbPath = dbReal;
+        dbSesion.clear();
+        conectar();
+        if (ok) cout << "[INFO] Sesión guardada en la base principal.\n";
+        else cerr << "[ERROR] No se pudo guardar la sesión.\n";
+        return ok;
+    }
+
+    // No: se elimina todo lo de la sesión (BD temp + snapshots/zips nuevos).
+    bool descartarSesion() {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        desconectar();
+        fs::remove(dbSesion, ec);
+        fs::remove(dbSesion + "-wal", ec);
+        fs::remove(dbSesion + "-shm", ec);
+        int borrados = 0;
+        if (fs::exists("data/snapshots", ec)) {
+            for (auto& e : fs::recursive_directory_iterator("data/snapshots", ec)) {
+                if (!e.is_regular_file(ec)) continue;
+                std::error_code ec2;
+                if (e.last_write_time(ec2) > t0sesion) {
+                    fs::remove(e.path(), ec2);
+                    if (!ec2) borrados++;
+                }
+            }
+        }
+        dbPath = dbReal;
+        dbSesion.clear();
+        conectar();
+        cout << "[INFO] Sesión descartada: nada de lo cargado se guardó (" << borrados << " archivos de caché eliminados).\n";
+        return true;
     }
 
     static string colText(sqlite3_stmt* s, int c) {
@@ -1668,7 +1781,16 @@ public:
 
 class GestorInterop {
 public:
+    // S38+: BD de sesión (temp). Vacío = la real por defecto.
+    static string dbSesionForzada;
+    static void usarDBSesion(const string& ruta) { dbSesionForzada = ruta; }
+    static string conDB(const string& argumentos) {
+        if (!dbSesionForzada.empty() && argumentos.find("--db") == string::npos)
+            return argumentos + " --db \"" + dbSesionForzada + "\"";
+        return argumentos;
+    }
     static bool ejecutarScriptPython(string argumentos) {
+        argumentos = conDB(argumentos);
         cout << "\n[INTEROP] Invocando script Python con argumentos: " << argumentos << "...\n";
         
         // PYTHONIOENCODING=utf-8: la tuberia hereda la consola cp1252 y los
@@ -1700,7 +1822,7 @@ public:
 
     // Ejecuta el script y devuelve su salida para parsearla (buscador por nombre).
     static string salidaPython(const string& argumentos) {
-        string comando = "set PYTHONIOENCODING=utf-8&& C:\\msys64\\ucrt64\\bin\\python.exe Taller2_KM_PO_XX.py " + argumentos;
+        string comando = "set PYTHONIOENCODING=utf-8&& C:\\msys64\\ucrt64\\bin\\python.exe Taller2_KM_PO_XX.py " + conDB(argumentos);
         string out;
         FILE* pipe = popen(comando.c_str(), "r");
         if (!pipe) return out;
@@ -1722,8 +1844,9 @@ public:
     }
 };
 
-struct CandidatoGrupo {
-    string nro, nombre, col, lider, inst, cat;
+string GestorInterop::dbSesionForzada = "";
+
+struct CandidatoGrupo {    string nro, nombre, col, lider, inst, cat;
 };
 
 // ============================================================================
@@ -1743,6 +1866,12 @@ public:
     void iniciar() {
         inicializarTerminal();
         gestorBD.conectar();
+        // S38+: toda la sesión corre sobre BD temporal (a prueba de cierre
+        // con X: la real solo se toca con Sí al salir). Python también vía --db.
+        if (gestorBD.iniciarSesion())
+            GestorInterop::usarDBSesion(gestorBD.rutaSesion());
+        else
+            cout << "[AVISO] Sin BD de sesión: se trabaja directo (el descarte al salir puede fallar).\n";
 
         limpiarPantalla();
         cout << "======================================================================\n";
@@ -2262,9 +2391,22 @@ public:
                     demoTDAs();
                     break;
 
-                case '0':
+                case '0': {
+                    cout << "\n----------------------------------------------------------------------\n";
+                    cout << " ¿Desea guardar los datos de esta sesion?\n";
+                    cout << " 1. Si (conservar todo lo cargado y salir)\n";
+                    cout << " 2. No (eliminar lo generado en la sesion y salir)\n";
+                    cout << "----------------------------------------------------------------------\n";
+                    char gs = '\0';
+                    while (gs != '1' && gs != '2') {
+                        gs = leerOpcion(" Seleccione una opcion [1-2] + ENTER: ");
+                        if (gs != '1' && gs != '2') cout << "[AVISO] Opcion invalida. Escriba 1 o 2 y pulse ENTER.\n";
+                    }
+                    if (gs == '2') gestorBD.descartarSesion();
+                    else gestorBD.confirmarSesion();
                     cout << "\nGracias por utilizar el sistema PEA-i de la Universidad Popular del Cesar.\n";
                     break;
+                }
 
                 default:
                     cout << "\nOpción inválida. Intente de nuevo.\n";

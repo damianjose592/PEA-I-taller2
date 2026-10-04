@@ -24,6 +24,7 @@ DB_DEF = os.path.join(BASE, "data", "pea_investigacion.db")
 SNAP_DIR = os.path.join(BASE, "data", "snapshots")
 GRUPOS_DEF = os.path.join(BASE, "data", "grupos_upc.txt")
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PEA-i-UPC/1.0"}
+HILOS_CVLAC = 12  # S38: paralelo por ficha (misma lógica, solo más rápido)
 
 # Columnas canonicas del sistema (schema.sql). Todo lo demas se descarta.
 GRUPO_COLS = ["codigo_grupo", "nombre", "lider", "plan_investigacion", "lineas_estrategicas"]
@@ -176,7 +177,8 @@ def descargar_cache(url, nombre_local, db):
         return "sin_cambios", r.text
     dup = conn.execute("SELECT ruta FROM cache_fuentes WHERE sha256=? AND ruta<>'';",
                        (digest,)).fetchone()
-    os.makedirs(SNAP_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.join(SNAP_DIR, nombre_local)) or SNAP_DIR,
+                exist_ok=True)
     if dup and os.path.exists(dup[0]):
         conn.execute("REPLACE INTO cache_fuentes (url, sha256, etag, last_modified, fecha, ruta)"
                      " VALUES (?,?,?,?,?,?);",
@@ -210,7 +212,7 @@ def empaquetar_grupo(codigo, nro="", reutilizar=True):
     if nro:
         claves.append(nro)
         claves.append(nro[-4:])
-    files = [f for f in glob.glob(os.path.join(SNAP_DIR, "*.html"))
+    files = [f for f in _todos_html()
              if any(k in os.path.basename(f).lower() for k in claves)]
     if not files:
         # Sin fuentes propias: reutilizar el vigente si ya existe (idempotencia).
@@ -255,21 +257,113 @@ def limpiar_zips_huerfanos():
     return eliminados
 
 
+def _todos_html():
+    """Todos los .html bajo snapshots/ (recursivo, S38: por subcarpeta)."""
+    out = []
+    if not os.path.isdir(SNAP_DIR):
+        return out
+    for root, _ds, fs in os.walk(SNAP_DIR):
+        for f in fs:
+            if f.endswith(".html"):
+                out.append(os.path.join(root, f))
+    return out
+
+
 def _snapshot_para_nro(nro):
-    """Snapshot GrupLAC local para un nro (sin red)."""
+    """Snapshot GrupLAC local para un nro (sin red). Busca recursivo."""
     if not os.path.isdir(SNAP_DIR):
         return ""
     exacto = os.path.join(SNAP_DIR, "gruplac_%s.html" % nro)
     if os.path.exists(exacto):
         return exacto
-    cands = [f for f in os.listdir(SNAP_DIR) if nro in f and f.endswith(".html")]
+    cands = [f for f in _todos_html()
+             if nro in os.path.basename(f) and os.path.basename(f).startswith("gruplac")]
     if not cands:
-        cands = [f for f in os.listdir(SNAP_DIR)
-                 if f.endswith(".html") and nro[-4:] in f
+        cands = [f for f in _todos_html()
+                 if nro[-4:] in os.path.basename(f)
                  and os.path.basename(f).startswith("gruplac")]
     if cands:
-        return os.path.join(SNAP_DIR, sorted(cands)[0])
+        return sorted(cands)[0]
     return ""
+
+
+def _snapshot_cvlac(cod_rh):
+    """Snapshot CvLAC local (recursivo)."""
+    cands = [f for f in _todos_html()
+             if os.path.basename(f) == "cvlac_%s.html" % cod_rh]
+    return sorted(cands)[0] if cands else ""
+
+
+def carpeta_grupo(codigo):
+    d = os.path.join(SNAP_DIR, codigo)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# S38: nro GrupLAC -> código vigente (para organizar snapshots por carpeta).
+NRO_A_CODIGO = {"00000000002099": "COL0018706", "00000000002668": "COL0043834",
+                "00000000003639": "COL0001351", "00000000003202": "COL0049121"}
+
+
+def codigo_de_nro(nro, db=""):
+    for k, v in NRO_A_CODIGO.items():
+        if k == nro or k.endswith(nro):
+            return v
+    idx = os.path.join(BASE, "data", "indice_grupos.json")
+    if os.path.exists(idx):
+        try:
+            d = json.load(open(idx, encoding="utf-8"))
+            items = d if isinstance(d, list) else d.get("grupos", [])
+            for g in items if isinstance(items, list) else []:
+                if isinstance(g, dict) and str(g.get("nro", "")) == nro:
+                    return g.get("ccrg") or g.get("codigo") or ""
+        except Exception:
+            pass
+    if db:
+        try:
+            conn = sqlite3.connect(db)
+            for cg, _nm in conn.execute("SELECT codigo_grupo, nombre FROM Grupos;"):
+                if nro[-6:] in cg or nro[-4:] in cg:
+                    conn.close()
+                    return cg
+            conn.close()
+        except Exception:
+            pass
+    return ""
+
+
+def mover_a_carpeta_grupo(codigo, db):
+    """S38: junta en snapshots/<CODIGO>/ los html sueltos del grupo y
+    actualiza sus rutas en cache_fuentes. Devuelve cuántos movió."""
+    import shutil
+    dest = carpeta_grupo(codigo)
+    movidos = 0
+    conn = sqlite3.connect(db)
+    for f in _todos_html():
+        base = os.path.basename(f)
+        if os.path.dirname(f) == dest:
+            continue
+        destino = ""
+        if base.startswith(("gruplac", "verperfiles")):
+            m = re.search(r"(\d{4,16})", base)
+            if m and codigo_de_nro(m.group(1), db) == codigo:
+                destino = os.path.join(dest, base)
+        elif base.startswith("cvlac"):
+            m = re.search(r"cvlac_(\d+)\.html", base)
+            if m and conn.execute(
+                    "SELECT 1 FROM grupo_investigador WHERE codigo_grupo_fk=? AND cod_rh_fk=?;",
+                    (codigo, m.group(1))).fetchone():
+                destino = os.path.join(dest, base)
+        if destino:
+            try:
+                shutil.move(f, destino)
+                conn.execute("UPDATE cache_fuentes SET ruta=? WHERE ruta=?;", (destino, f))
+                movidos += 1
+            except Exception as e:
+                print("aviso mover %s: %s" % (base, e))
+    conn.commit()
+    conn.close()
+    return movidos
 
 
 def existe_grupo_en_bd(nro, db):
@@ -382,6 +476,20 @@ def guardar_producto(conn, cod_grupo, rh, p):
                              (ya2[0],))
                 return "actualizado"
             return "existente"
+    # S38: gemelos por mayúsculas/puntuación (misma obra, distinto registro).
+    # Misma norma de la limpieza S37: se conserva el existente, no se duplica.
+    norma = re.sub(r"[^a-z0-9]+", "", _norm_txt(p["titulo"]))
+    if norma:
+        for pid, tit, val in conn.execute(
+                "SELECT id_producto, titulo, estado_validacion FROM Productos"
+                " WHERE anio_publicacion=? AND codigo_grupo_fk=? AND cod_rh_investigador_fk=?;",
+                (anio, cod_grupo, rh)):
+            if re.sub(r"[^a-z0-9]+", "", _norm_txt(tit or "")) == norma:
+                if val == "Pendiente" and (p.get("estado_validacion") or "") == "Validado":
+                    conn.execute("UPDATE Productos SET estado_validacion='Validado' WHERE id_producto=?;",
+                                 (pid,))
+                    return "actualizado"
+                return "existente"
     conn.execute(
         "INSERT INTO Productos (titulo, tipo_producto, categoria, estado_validacion, anio_publicacion,"
         " codigo_grupo_fk, cod_rh_investigador_fk, estado) VALUES (?,?,?,?,?,?,?,1);",
@@ -759,15 +867,8 @@ def scrape_grupo(nro, db, usar_snapshot=True, universidad="", forzar=False, con_
            "visualizagr.jsp?nro=%s" % nro)
     html = None
     if usar_snapshot:
-        snap = os.path.join(SNAP_DIR, "gruplac_%s.html" % nro)
-        if not os.path.exists(snap):  # tolera nombres tipo gruplac_gisico_2099.html
-            cands = [f for f in os.listdir(SNAP_DIR) if nro in f and f.endswith(".html")]
-            if not cands:
-                cands = [f for f in os.listdir(SNAP_DIR)
-                         if f.endswith(".html") and nro[-4:] in f]
-            if cands:
-                snap = os.path.join(SNAP_DIR, sorted(cands)[0])
-        if os.path.exists(snap):
+        snap = _snapshot_para_nro(nro)  # recursivo (S38: por subcarpeta)
+        if snap and os.path.exists(snap):
             with open(snap, encoding="utf-8", errors="replace") as f:
                 html = f.read()
             origen = "snapshot"
@@ -860,15 +961,37 @@ def scrape_grupo(nro, db, usar_snapshot=True, universidad="", forzar=False, con_
         n_perf = len(perfiles_vp)
     conn.commit()
     # S37: hoja de vida individual por integrante (CvLAC). Nunca tumba la carga.
+    # S38: en paralelo (12 hilos; cada ficha abre su propia conexión; parseo,
+    # guardado y reglas idénticos: solo cambia el orden de llegada).
     n_hv = 0
-    if con_cvlac:
-        for rh in rhs_grupo:
+    if con_cvlac and rhs_grupo:
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        estado = {"hechos": 0, "total": len(rhs_grupo)}
+        cerrojo = threading.Lock()
+
+        def _uno(rh):
             try:
-                if scrape_cvlac(rh, db, codigo):
-                    n_hv += 1
+                return (rh, scrape_cvlac(rh, db, codigo, quiet=True) is not None, "")
             except Exception as e:
-                print("aviso cvlac %s: %s" % (rh, e))
+                return (rh, False, str(e))
+
+        with ThreadPoolExecutor(max_workers=HILOS_CVLAC) as ex:
+            futs = {ex.submit(_uno, rh): rh for rh in rhs_grupo}
+            for f in as_completed(futs):
+                rh, ok, err = f.result()
+                with cerrojo:
+                    estado["hechos"] += 1
+                    if ok:
+                        n_hv += 1
+                    print("CvLAC %d/%d %s %s" % (estado["hechos"], estado["total"], rh,
+                          "OK" if ok else ("AVISO " + (err[:80] if err else "sin datos"))))
     conn.close()
+    # S38: organizar snapshots en su subcarpeta antes de empaquetar.
+    try:
+        mover_a_carpeta_grupo(codigo, db)
+    except Exception as e:
+        print("aviso organizar %s: %s" % (codigo, e))
     z = empaquetar_grupo(codigo, nro)
     rep = ("OK scrape-grupo %s (%s): [%s] %s | lider=%s | avalan=%s | grupo=%s integrantes=%d historicos_omitidos=%d descartados=%d productos=%d validados=%d hv=%d sin_autor=%d omitidos_tipo=%d perfiles=%d zip=%s"
            % (nro, origen, codigo, (ficha["nombre"] or "")[:60], (ficha["lider"] or "")[:40],
@@ -1006,18 +1129,21 @@ def grupos_de(conn, rh):
         "SELECT codigo_grupo_fk FROM grupo_investigador WHERE cod_rh_fk=?;", (rh,))]
 
 
-def scrape_cvlac(cod_rh, db, cod_grupo=""):
+def scrape_cvlac(cod_rh, db, cod_grupo="", quiet=False):
     os.makedirs(SNAP_DIR, exist_ok=True)
-    snap = os.path.join(SNAP_DIR, "cvlac_%s.html" % cod_rh)
+    snap = _snapshot_cvlac(cod_rh)  # recursivo (S38)
     html = None
-    if os.path.exists(snap):
+    if snap and os.path.exists(snap):
         with open(snap, encoding="utf-8", errors="replace") as f:
             html = f.read()
         origen = "snapshot"
     else:
         url = ("https://scienti.minciencias.gov.co/cvlac/visualizador/"
                "generarCurriculoCv.do?cod_rh=%s" % cod_rh)
-        origen, html = descargar_cache(url, "cvlac_%s.html" % cod_rh, db)
+        # S38: la ficha vive en la subcarpeta de su grupo (si se conoce).
+        nom_local = ("cvlac_%s.html" % cod_rh if not cod_grupo
+                     else os.path.join(cod_grupo, "cvlac_%s.html" % cod_rh))
+        origen, html = descargar_cache(url, nom_local, db)
         if origen.startswith("error") or not html:
             print("ERROR cvlac %s %s" % (cod_rh, origen))
             return None
@@ -1087,10 +1213,11 @@ def scrape_cvlac(cod_rh, db, cod_grupo=""):
                 n_e += 1
     conn.commit()
     conn.close()
-    print("OK scrape-cvlac %s (%s): %s | cat=%s | par=%s | hv=%s | articulos_nuevos=%d existentes=%d grupos=%s"
-          % (cod_rh, origen, cv["nombre"][:50], cv["categoria"], hv["par_evaluador"],
-             ("citas+formacion" if hv["nombre_citaciones"] or hv["formacion_academica"] else "basica"),
-             n_p, n_e, grupos if grupos else "ninguno"))
+    if not quiet:
+        print("OK scrape-cvlac %s (%s): %s | cat=%s | par=%s | hv=%s | articulos_nuevos=%d existentes=%d grupos=%s"
+              % (cod_rh, origen, cv["nombre"][:50], cv["categoria"], hv["par_evaluador"],
+                 ("citas+formacion" if hv["nombre_citaciones"] or hv["formacion_academica"] else "basica"),
+                 n_p, n_e, grupos if grupos else "ninguno"))
     return {"categoria": cv["categoria"], "articulos": n_p}
 
 
@@ -1599,6 +1726,10 @@ def scrape_perfiles(nro, db, convocatoria="22", usar_snapshot=True):
     n_ind = len(perfiles)
     conn.commit()
     conn.close()
+    try:
+        mover_a_carpeta_grupo(codigo, db)
+    except Exception as e:
+        print("aviso organizar %s: %s" % (codigo, e))
     z = empaquetar_grupo(codigo, nro)
     print("OK verPerfiles %s (%s): [%s] CCRG=%s lider=%s indicadores=%d zip=%s"
           % (nro, origen, codigo, basicos["ccrg"], (basicos["lider"] or "")[:40],
@@ -1630,12 +1761,30 @@ def main(argv=None):
                     help="S32: re-scrapea aunque el grupo ya esté cargado")
     ap.add_argument("--sin-cvlac", action="store_true",
                     help="S37: omite la hoja de vida CvLAC por integrante (carga rápida)")
+    ap.add_argument("--hilos", type=int, default=12,
+                    help="S38: hilos paralelos para CvLAC (1 = secuencial)")
     ap.add_argument("--existe-grupo", default="",
                     help="S32: chequeo offline (sin red) ¿el nro ya está en BD?")
     ap.add_argument("--limpiar-zips", action="store_true",
                     help="S32: borra zips legacy huérfanos (GISICO->COL0018706...)")
+    ap.add_argument("--organizar-snapshots", action="store_true",
+                    help="S38: mueve los html sueltos a snapshots/<CODIGO>/ (una vez)")
     a = ap.parse_args(argv)
+    global HILOS_CVLAC
+    HILOS_CVLAC = max(1, a.hilos)
 
+    if a.organizar_snapshots:
+        conn = sqlite3.connect(a.db)
+        try:
+            cods = [r[0] for r in conn.execute("SELECT codigo_grupo FROM Grupos;")]
+        except Exception:
+            cods = []
+        conn.close()
+        tot = 0
+        for cod in cods:
+            tot += mover_a_carpeta_grupo(cod, a.db)
+        print("snapshots organizados: %d archivos" % tot)
+        return 0
     if a.limpiar_zips:
         lim = limpiar_zips_huerfanos()
         return 0

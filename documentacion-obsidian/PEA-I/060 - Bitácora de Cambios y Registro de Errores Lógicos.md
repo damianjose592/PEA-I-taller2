@@ -205,7 +205,6 @@ Archivos raíz perdidos al copiar el repo (papelera y disco revisados: sin copia
 - **Backfill `--forzar` 3 grupos:** 0 nuevos (idempotente) + **307 a Validado** (146 Articulo, 75 Software, 40 Tesis, 26 Capitulo, 20 Libro); 854 siguen `Pendiente`. `foreign_key_check` vacío. Sin cambios C++ (columna VALID 11 ya cabe).
 
 ## Sesión 37 — Hoja de vida CvLAC por integrante (pedido del usuario)
-
 - **Pedido:** al cargar un grupo, descargar también lo individual de cada integrante (ej. CvLAC `cod_rh=0000447650`, Carmen Araújo): Par evaluador, categoría, citaciones, nacionalidad, sexo, Scholar/ORCID, formación, experiencia, áreas, idiomas.
 - **Fix Python:** `parse_hoja_vida()` (etiquetas + secciones, sección más larga gana al menú duplicado) + tabla nueva `perfil_investigador` 1:1 (FK cascada, en `schema.sql` + `conectar()`, sin tocar lo existente) + `scrape_cvlac()` la guarda (REPLACE) + `scrape_grupo(..., con_cvlac=True)` la descarga por cada rh (con `commit` previo, nunca tumba la carga) + flag `--sin-cvlac` + blindaje S31 (jamás pisar limpio con �) + `migrar_encoding` con `con_cvlac=False`.
 - **Fix C++:** `GestorSQLite::verPerfilInvestigador()` (lee directo de SQLite, la RAM sigue con TDAs puros) + opción investigadores-2 la muestra tras el detalle.
@@ -219,6 +218,21 @@ Archivos raíz perdidos al copiar el repo (papelera y disco revisados: sin copia
 - **Datos básicos a DATOS PERSONALES (pedido del usuario):** Correo/Categoría/CvLAC salen del encabezado `===` y abren la sección con etiquetas alineadas (`etiquetaCV()`); correo vacío → `No`.
 - **CV sin productos (pedido del usuario, dos veces):** la hoja de vida no lista productos ni adscripciones (eso vive en las vistas del grupo); solo currículo personal y formación.
 - **Incidente (causa del "todo sigue igual"):** el usuario probaba con una instancia vieja aún corriendo (`Taller2_KM_PO_XX.exe` bloqueaba la copia al recompilar) — regla: cerrar TODO antes de probar; ambos exes se sincronizan al mismo binario.
+
+## Sesión 38 — Salir Sí/No + detalle sin volcado + CvLAC paralelo + snapshots por grupo (4 pedidos)
+
+- **1. Salir con guardar (visión 013):** `iniciar()` crea `pea_investigacion.db.bak-sesion` (con WAL checkpoint); opción `0` pregunta 1=Sí (conserva) / 2=No (`descartarSesion()`: restaura backup + borra `-wal`/`-shm` + snapshots/zips más nuevos que el backup). Sin tocar TDAs ni ingesta. `.gitignore` ignora `*.bak-sesion`.
+- **2. Detalle sin volcado:** `verDetalleGrupo()` ya no lista cientos de productos: conteo total + por tipo + top 10 recientes (la cadena viene nueva-primero, S30) + aviso al listado completo. Punto 3 intacto.
+- **3. Velocidad (12 hilos, lógica intacta):** `ThreadPoolExecutor(12)` por ficha CvLAC (cada una con conexión propia; parse/guardado/reglas iguales) + `quiet=True` con progreso `CvLAC i/N` + flag `--hilos` (1=secuencial). Medido: 72 frescas en 24s (~5 min secuencial). De paso: `guardar_producto()` con anti-duplicado normalizado (los 6 gemelos que volvían ya no entran; idempotencia verificada productos=0).
+- **4. Orden snapshots:** `data/snapshots/<CODIGO>/` (478 archivos migrados con `--organizar-snapshots`); `zip/` intacto; rutas recursivas en `_snapshot_para_nro/_snapshot_cvlac/empaquetar_grupo`; `cache_fuentes` actualizada al mover; `migrar_encoding` no afectado.
+- **Estado:** 4 grupos, 359 invs, 359 perfiles, 2352 productos, 2 � (irrecuperables S31), FK vacío. `py_compile` + `g++` limpios.
+
+## Sesión 39 — El No no borraba + sesión temporal a prueba de X (reporte grave del usuario)
+
+- **Reporte:** EIDGA cargado + No al salir, pero quedó guardado. Evidencia: backup 4:58:42pm pre-EIDGA existía pero el restore nunca corrió (cierre con X, binario previo o Sí marcado).
+- **Limpieza inmediata:** EIDGA (`COL0240762`) eliminado con cascade seguro (backup previo): 116 productos, 182 perfiles-grupo, 26 invs exclusivos + hv, 29 filas caché, 27 snapshots + zip; el compartido se conserva. FK vacío; quedan 4 grupos.
+- **Blindaje real (a prueba de X):** la sesión corre sobre `data/pea_sesion.db` (copia al arrancar; Python vía `--db` automático en `conDB()`); Sí la promueve a real (+`.bak-previa`), No la borra + limpia snapshots nuevos. Cerrar con X = la real intacta por construcción. `.gitignore`: `*.db-wal/shm`, `*.bak-previa`.
+- **Verificado:** `g++` + `py_compile` limpios (test interactivo lo hace el usuario: cargar → salir-No → debe quedar igual).
 
 ## 🐛 Bugs
 | ID | Bug | Estado |
@@ -235,3 +249,4 @@ Archivos raíz perdidos al copiar el repo (papelera y disco revisados: sin copia
 | BUG-08 (nuevo) | `pea_investigacion.db` bloqueado por otro proceso (no `pea_cpp.exe`; sospecha SQLite Viewer) impide borrar el archivo | workaround S14: reseed in-place; **recomendación: cerrar la pestaña del .db en VS Code antes de re-sembrar** |
 | BUG-11 (nuevo, detectado por el usuario) | Doble carga GISICO generaba 2.º zip (`grupo_GISICO.zip` + `grupo_COL0018706.zip`): zip por código + código migrado sigla→COL + scrape que seguía tras `existente` + C++ sin pre-chequeo | **corregido S32**: pre-chequeo offline `existe_grupo_en_bd()` → `grupo ya existente`, zip reutilizado, legacy limpiados, flags `--forzar/--existe-grupo/--limpiar-zips`, C++ avisa antes del `popen` |
 | BUG-12 (nuevo, detectado por el usuario, grave) | Arranque con sí + grupo ya existente (o búsqueda cancelada/fallida) entraba al menú sin datos en automático: `iniciar()` sin guardián + S33 sin recarga | **corregido S34**: `menuBuscarGrupo()` retorna bool + `iniciar()` en bucle con submenú 1-buscar otro (repite si/no) / 2-precargar SQLite / 3-sin datos explícito |
+| BUG-13 (nuevo, detectado por el usuario, grave) | Salir con No no borraba (EIDGA quedó guardado): el restore backup nunca corrió en esa sesión | **corregido S39**: sesión sobre BD temporal (`pea_sesion.db`, Python con `--db` automático); Sí promueve, No elimina; X-close seguro por construcción |

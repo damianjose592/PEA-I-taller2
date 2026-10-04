@@ -4,6 +4,8 @@ URLs obligatorias: GrupLAC `...nro=00000000002099` y CvLAC `...cod_rh=0000494917
 
 Blindaje: `timeout=10` + `Retry(3)` + User-Agent + SQL parametrizado, **plan B `--offline`** con `dataset_respaldo.csv` (siempre demoable), snapshot HTML para tests. Regla de proyección punto 7: **solo columnas del sistema, resto se descarta y reporta**; fila sin PK/NOT NULL se descarta. CvLAC real desde S16 (ficha + artículos; libros/software pendientes).
 
+S38: CvLAC en paralelo (12 hilos, `--hilos` configurable; cada ficha con conexión propia, misma lógica) + progreso `i/N`; snapshots organizados por `snapshots/<CODIGO>/` (`--organizar-snapshots` los migró).
+
 verPerfiles por grupo (S28): `verPerfiles.jsp?id_convocatoria=22&nroIdGrupo=` → CCRG/COL real, líder, instituciones, programa + indicadores por subtipo y cuartil en `perfiles_grupo` (125 filas GISICO). Incluye migración sigla/G+nro → COL con FK OFF + `foreign_key_check` limpio.
 
 ## Arquitectura de caché oficial (S19, aprobada)

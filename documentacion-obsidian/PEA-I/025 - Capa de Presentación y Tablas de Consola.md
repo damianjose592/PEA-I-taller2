@@ -8,3 +8,4 @@ Solo presentación: **cero cambios en TDAs, datos o lógica**. Reglas:
 - Helpers en `Taller2_KM_PO_XX.cpp`: `anchoVisual/truncarVisual/celdaV/bordeTabla/filaTabla/tituloTabla`.
 - Las 6 salidas migradas (S15/S25/S26): grupos, ventana años, resumen 12.a, investigadores (global + por grupo), productos, más candidatos y `elegirGrupo()`.
 - S35: columna TIPO a 12 (los 15 tipos caben, ver [[034 - Producción por Tipo del Grupo]]); `listarProductosDeGrupo()` con pie de conteo por tipo; líneas de `verDetalleGrupo()` con `[tipo/...]`.
+- S38: `verDetalleGrupo()` sin volcado (conteo + top 10 recientes); opción `0` con menú Guardar Sí/No; hoja de vida estilo currículo (`imprimirBloque/partirPorMarcas/espaciar/etiquetaCV`).
